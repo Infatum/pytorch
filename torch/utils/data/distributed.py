@@ -21,10 +21,10 @@ class DistributedSampler(Sampler[T_co]):
     .. note::
         Dataset is assumed to be of constant size.
 
-    Args:
+    Arguments:
         dataset: Dataset used for sampling.
         num_replicas (int, optional): Number of processes participating in
-            distributed training. By default, :attr:`world_size` is retrieved from the
+            distributed training. By default, :attr:`rank` is retrieved from the
             current distributed group.
         rank (int, optional): Rank of the current process within :attr:`num_replicas`.
             By default, :attr:`rank` is retrieved from the current distributed
@@ -57,8 +57,8 @@ class DistributedSampler(Sampler[T_co]):
     """
 
     def __init__(self, dataset: Dataset, num_replicas: Optional[int] = None,
-                 rank: Optional[int] = None, shuffle: bool = True,
-                 seed: int = 0, drop_last: bool = False) -> None:
+                 rank: Optional[int] = None, shuffle: bool = True, batch_size: int=None,
+                 seed: int = 0, drop_last: bool = False, preserve_sequence: bool = False) -> None:
         if num_replicas is None:
             if not dist.is_available():
                 raise RuntimeError("Requires distributed package to be available")
@@ -67,15 +67,13 @@ class DistributedSampler(Sampler[T_co]):
             if not dist.is_available():
                 raise RuntimeError("Requires distributed package to be available")
             rank = dist.get_rank()
-        if rank >= num_replicas or rank < 0:
-            raise ValueError(
-                "Invalid rank {}, rank should be in the interval"
-                " [0, {}]".format(rank, num_replicas - 1))
         self.dataset = dataset
         self.num_replicas = num_replicas
         self.rank = rank
         self.epoch = 0
+        self.batch_size = batch_size
         self.drop_last = drop_last
+        self.preserve_sequence = preserve_sequence
         # If the dataset length is evenly divisible by # of replicas, then there
         # is no need to drop any data, since the dataset will be split equally.
         if self.drop_last and len(self.dataset) % self.num_replicas != 0:  # type: ignore
@@ -104,18 +102,24 @@ class DistributedSampler(Sampler[T_co]):
 
         if not self.drop_last:
             # add extra samples to make it evenly divisible
-            padding_size = self.total_size - len(indices)
-            if padding_size <= len(indices):
-                indices += indices[:padding_size]
-            else:
-                indices += (indices * math.ceil(padding_size / len(indices)))[:padding_size]
+            indices += indices[:(self.total_size - len(indices))]
         else:
             # remove tail of data to make it evenly divisible.
             indices = indices[:self.total_size]
         assert len(indices) == self.total_size
 
         # subsample
-        indices = indices[self.rank:self.total_size:self.num_replicas]
+        if self.preserve_sequence:
+            import itertools
+            if self.batch_size is None:
+                indices = indices[rank * self.num_samples: rank * self.num_samples + self.num_samples]
+            else:
+                ix = [[i for i in range(i, i + self.batch_size)] for i in
+                 range(rank * self.batch_size, len(indices), self.batch_size * self.num_replicas)]
+                indices = list(itertools.chain(*res))
+            indices = indices[rank * self.batch_size - self.batch_size:rank * self.batch_size:self.num_replicas]
+        else:
+            indices = indices[self.rank:self.total_size:self.num_replicas]
         assert len(indices) == self.num_samples
 
         return iter(indices)
@@ -129,7 +133,7 @@ class DistributedSampler(Sampler[T_co]):
         use a different random ordering for each epoch. Otherwise, the next iteration of this
         sampler will yield the same ordering.
 
-        Args:
+        Arguments:
             epoch (int): Epoch number.
         """
         self.epoch = epoch
