@@ -88,6 +88,9 @@ class DistributedSampler(Sampler[T_co]):
         else:
             self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)  # type: ignore
         self.total_size = self.num_samples * self.num_replicas
+        if preserve_sequence and batch_size is not None:
+            if rank > 0 and self.total_size % (self.batch_size * self.num_replicas) != 0:
+                self.num_samples = len(self.dataset) // self.num_replicas
         self.shuffle = shuffle
         self.seed = seed
 
@@ -115,12 +118,13 @@ class DistributedSampler(Sampler[T_co]):
                 indices = indices[rank * self.num_samples: rank * self.num_samples + self.num_samples]
             else:
                 ix = [[i for i in range(i, i + self.batch_size)] for i in
-                 range(rank * self.batch_size, len(indices), self.batch_size * self.num_replicas)]
-                indices = list(itertools.chain(*res))
-            indices = indices[rank * self.batch_size - self.batch_size:rank * self.batch_size:self.num_replicas]
+                 range(self.rank * self.batch_size, self.total_size, self.batch_size * self.num_replicas)]
+                indices = list(itertools.chain(*ix))
+                indices = indices[:self.num_samples] 
         else:
             indices = indices[self.rank:self.total_size:self.num_replicas]
-        assert len(indices) == self.num_samples
+        print(f'{len(indices) = }, {self.num_samples = }')
+        # assert len(indices) == self.num_samples
 
         return iter(indices)
 
